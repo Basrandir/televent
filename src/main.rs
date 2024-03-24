@@ -5,14 +5,18 @@ use frankenstein::ReplyParameters;
 use frankenstein::SendMessageParams;
 use frankenstein::TelegramApi;
 use frankenstein::UpdateContent;
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::Sqlite;
+use sqlx::{migrate::MigrateDatabase, SqlitePool};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 #[derive(Debug, Default)]
 pub struct Event {
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub location: Option<String>,
-    pub time: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub location: String,
+    pub time: String,
 }
 
 impl Event {
@@ -29,6 +33,53 @@ enum UserState {
     AwaitingTime,
 }
 
+const DB_URL: &str = "sqlite://events_bot.db";
+
+async fn init_db() -> Result<SqlitePool, sqlx::Error> {
+    let options = sqlx::sqlite::SqliteConnectOptions::from_str(DB_URL)?.create_if_missing(true);
+    let pool = SqlitePool::connect_with(options).await?;
+
+    let _ = sqlx::query(
+        "
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  location TEXT,
+  time TEXT
+)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    Ok(pool)
+}
+
+// This is a supremely ugly function. Need to look into sqlx macros for this.
+async fn create_event(
+    pool: &SqlitePool,
+    user_id: i64,
+    name: &str,
+    description: &str,
+    location: &str,
+    time: &str,
+) -> Result<(), sqlx::Error> {
+    let _ = sqlx::query(
+        "INSERT INTO events (user_id, name, description, location, time) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(description)
+    .bind(location)
+    .bind(time)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 fn send_message(api: &Api, chat_id: i64, text: &str) {
     let send_message_params = SendMessageParams::builder()
         .chat_id(chat_id)
@@ -40,7 +91,9 @@ fn send_message(api: &Api, chat_id: i64, text: &str) {
     }
 }
 
-pub fn main() {
+#[tokio::main]
+pub async fn main() {
+    let pool = init_db().await.unwrap();
     let token = std::env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN not set");
     let api = Api::new(&token.to_string());
 
@@ -74,7 +127,7 @@ pub fn main() {
                                 match state {
                                     UserState::AwaitingName => {
                                         if let Some(event) = user_events.get_mut(&user_id) {
-                                            event.name = Some(text.clone());
+                                            event.name = text.clone();
                                             user_states
                                                 .insert(user_id, UserState::AwaitingDescription);
 
@@ -87,7 +140,7 @@ pub fn main() {
                                     }
                                     UserState::AwaitingDescription => {
                                         if let Some(event) = user_events.get_mut(&user_id) {
-                                            event.description = Some(text.clone());
+                                            event.description = text.clone();
                                             user_states
                                                 .insert(user_id, UserState::AwaitingLocation);
 
@@ -100,7 +153,7 @@ pub fn main() {
                                     }
                                     UserState::AwaitingLocation => {
                                         if let Some(event) = user_events.get_mut(&user_id) {
-                                            event.location = Some(text.clone());
+                                            event.location = text.clone();
                                             user_states.insert(user_id, UserState::AwaitingTime);
 
                                             send_message(
@@ -112,13 +165,29 @@ pub fn main() {
                                     }
                                     UserState::AwaitingTime => {
                                         if let Some(event) = user_events.get_mut(&user_id) {
-                                            event.time = Some(text.clone());
+                                            event.time = text.clone();
 
-                                            send_message(
-                                                &api,
-                                                chat_id,
-                                                "The Event has been saved.",
-                                            );
+                                            match create_event(
+                                                &pool,
+                                                user_id as i64,
+                                                &event.name,
+                                                &event.description,
+                                                &event.location,
+                                                &event.time,
+                                            )
+                                            .await
+                                            {
+                                                Ok(_) => send_message(
+                                                    &api,
+                                                    chat_id,
+                                                    "The Event has been saved.",
+                                                ),
+                                                Err(e) => send_message(
+                                                    &api,
+                                                    chat_id,
+                                                    &format!("Failed to save event: {}", e),
+                                                ),
+                                            }
                                         }
                                     }
                                 }
