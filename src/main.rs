@@ -6,6 +6,7 @@ use frankenstein::SendMessageParams;
 use frankenstein::TelegramApi;
 use frankenstein::UpdateContent;
 use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::Row;
 use sqlx::Sqlite;
 use sqlx::{migrate::MigrateDatabase, SqlitePool};
 use std::collections::HashMap;
@@ -97,6 +98,53 @@ async fn create_event(
     Ok(())
 }
 
+async fn list_events(pool: &SqlitePool, chat_id: i64) -> Result<String, sqlx::Error> {
+    // Query to get events for the chat, ordered by date
+    let events = sqlx::query(
+        r#"
+        SELECT 
+            id,
+            title,
+            description,
+            location,
+            event_date,
+            creator,
+            (SELECT COUNT(*) FROM attendees WHERE event_id = events.id) as attendee_count
+        FROM events 
+        WHERE chat_id = ?
+        ORDER BY event_date
+        "#,
+    )
+    .bind(chat_id)
+    .fetch_all(pool)
+    .await?;
+
+    if events.is_empty() {
+        return Ok("No events scheduled.".to_string());
+    }
+
+    let mut output = String::from("📅 Upcoming Events:\n\n");
+
+    for row in events {
+        let id: i64 = row.get("id");
+        let title: String = row.get("title");
+        let description: String = row.get("description");
+        let location: String = row.get("location");
+        let event_date: String = row.get("event_date");
+        let attendee_count: i64 = row.get("attendee_count");
+
+        output.push_str(&format!("🎯 {}\n", title));
+        output.push_str(&format!("📝 {}\n", description));
+        output.push_str(&format!("📍 {}\n", location));
+        output.push_str(&format!("⏰ {}\n", event_date));
+        output.push_str(&format!("👥 {} attending\n", attendee_count));
+        output.push_str(&format!("🆔 {}\n", id));
+        output.push_str("\n");
+    }
+
+    Ok(output)
+}
+
 fn send_message(api: &Api, chat_id: i64, text: &str) {
     let send_message_params = SendMessageParams::builder()
         .chat_id(chat_id)
@@ -140,6 +188,19 @@ pub async fn main() {
                                 user_events.insert(user_id, Event::new());
 
                                 send_message(&api, chat_id, "Please enter the Name of the event.");
+                            } else if text == "/list" {
+                                match list_events(&pool, chat_id).await {
+                                    Ok(events_list) => {
+                                        send_message(&api, chat_id, &events_list);
+                                    }
+                                    Err(e) => {
+                                        send_message(
+                                            &api,
+                                            chat_id,
+                                            &format!("Failed to list events: {}", e),
+                                        );
+                                    }
+                                }
                             } else if let Some(state) = user_states.get(&user_id) {
                                 match state {
                                     UserState::AwaitingName => {
