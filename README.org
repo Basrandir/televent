@@ -1,0 +1,50 @@
+#+TITLE: Televent - Telegram Event Management Bot 🤖📅
+
+A feature-rich Telegram bot for managing events, tracking attendance, and sending reminders. Perfect for community organizers and group administrators!
+
+* Features ✨
+- **Group Integration** [1/1]:
+  - [X] Add to any Telegram group/channel
+- **Event Creation* [2/3] *:
+  - [X] Create events via DM or group chat
+  - [X] Set titles, descriptions, and dates
+  - [ ] Timezone-aware scheduling
+- **Attendance Tracking** [0/3]:
+  - [ ] RSVP with inline buttons
+  - [ ] Attendance status updates
+  - [ ] Participant lists
+- **Smart Notifications** [0/3]:
+  - [ ] Automated reminders
+  - [ ] Custom notification schedules
+  - [ ] Bulk and individual notifications
+- **Advanced Features* [0/4]*:
+  - [ ] Event modification/cancellation
+  - [ ] iCal calendar integration
+  - [ ] Natural language processing for dates
+  - [ ] Attendance analytics and reports
+
+* Installation & Setup 🛠️
+
+** Prerequisites
+- Rust 1.70+
+- SQLite3
+- Telegram Bot API token (@BotFather)
+
+** Quick Start
+#+begin_src bash
+  # Clone repository
+  git clone https://github.com/Basrandir/televent.git
+  cd televent
+
+  # Build and run
+  cargo run --release
+#+end_src
+
+* Configuration ⚙️
+Set the following environment variables:
+- TELEGRAM_BOT_TOKEN=your_bot_token_here
+
+Personally I use ~direnv~ alongside a ~.env~ file. Feel free to set environment variables however you're most comfortable with.
+
+* Usage 📖
+
