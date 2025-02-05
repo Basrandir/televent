@@ -13,10 +13,10 @@ use std::str::FromStr;
 
 #[derive(Debug, Default)]
 pub struct Event {
-    pub name: String,
+    pub title: String,
     pub description: String,
     pub location: String,
-    pub time: String,
+    pub datetime: String,
 }
 
 impl Event {
@@ -43,11 +43,26 @@ async fn init_db() -> Result<SqlitePool, sqlx::Error> {
         "
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
+  creator INTEGER NOT NULL,
+  title TEXT NOT NULL,
   description TEXT,
   location TEXT,
-  time TEXT
+  event_date TEXT NOT NULL,
+  chat_id INTEGER, -- NULL if a direct message
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let _ = sqlx::query(
+        "
+CREATE TABLE IF NOT EXISTS attendees (
+  event_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  PRIMARY KEY (event_id, user_id),
+  FOREIGN KEY (event_id) REFERENCES events (id)
 )",
     )
     .execute(&pool)
@@ -60,22 +75,24 @@ CREATE TABLE IF NOT EXISTS events (
 // This is a supremely ugly function. Need to look into sqlx macros for this.
 async fn create_event(
     pool: &SqlitePool,
-    user_id: i64,
-    name: &str,
+    creator: i64,
+    title: &str,
     description: &str,
     location: &str,
-    time: &str,
+    event_date: &str,
+    chat_id: i64,
 ) -> Result<(), sqlx::Error> {
     let _ = sqlx::query(
-        "INSERT INTO events (user_id, name, description, location, time) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO events (creator, title, description, location, event_date, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .bind(user_id)
-    .bind(name)
-    .bind(description)
-    .bind(location)
-    .bind(time)
-    .execute(pool)
-    .await?;
+        .bind(creator)
+        .bind(title)
+        .bind(description)
+        .bind(location)
+        .bind(event_date)
+        .bind(chat_id)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -127,7 +144,7 @@ pub async fn main() {
                                 match state {
                                     UserState::AwaitingName => {
                                         if let Some(event) = user_events.get_mut(&user_id) {
-                                            event.name = text.clone();
+                                            event.title = text.clone();
                                             user_states
                                                 .insert(user_id, UserState::AwaitingDescription);
 
@@ -165,15 +182,16 @@ pub async fn main() {
                                     }
                                     UserState::AwaitingTime => {
                                         if let Some(event) = user_events.get_mut(&user_id) {
-                                            event.time = text.clone();
+                                            event.datetime = text.clone();
 
                                             match create_event(
                                                 &pool,
                                                 user_id as i64,
-                                                &event.name,
+                                                &event.title,
                                                 &event.description,
                                                 &event.location,
-                                                &event.time,
+                                                &event.datetime,
+                                                chat_id as i64,
                                             )
                                             .await
                                             {
