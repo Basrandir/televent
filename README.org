@@ -9,9 +9,9 @@ A feature-rich Telegram bot for managing events, tracking attendance, and sendin
   - [X] Create events via DM or group chat
   - [X] Set titles, descriptions, and dates
   - [ ] Timezone-aware scheduling
-- *Attendance Tracking* [0/3]:
-  - [ ] RSVP with inline buttons
-  - [ ] Attendance status updates
+- *Attendance Tracking* [2/3]:
+  - [X] RSVP with inline buttons
+  - [X] Attendance status updates
   - [ ] Participant lists
 - *Smart Notifications* [0/3]:
   - [ ] Automated reminders
