@@ -236,52 +236,6 @@ impl Bot {
         Ok(())
     }
 
-    /// Lists all events in a chat
-    async fn list_events(&self, chat_id: i64) -> Result<(), BotError> {
-        let events = self.fetch_events(chat_id).await?;
-
-        if events.is_empty() {
-            self.send_message(chat_id, "No events scheduled.").await?;
-            return Ok(());
-        }
-
-        for event in events {
-            let message = event.format_message();
-            let keyboard = event.create_keyboard();
-
-            let params = SendMessageParams::builder()
-                .chat_id(chat_id)
-                .text(message)
-                .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard))
-                .build();
-
-            self.api.send_message(&params)?;
-        }
-
-        Ok(())
-    }
-
-    /// Fetches events from the database
-    async fn fetch_events(&self, chat_id: i64) -> Result<Vec<Event>, sqlx::Error> {
-        let events = sqlx::query(
-            r#"
-            SELECT 
-                id, title, description, location, event_date, creator,
-                (SELECT COUNT(*) FROM attendees WHERE event_id = events.id) as attendee_count
-            FROM events 
-            WHERE chat_id = ?
-            "#,
-        )
-        .bind(chat_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        events
-            .into_iter()
-            .map(Event::from_row)
-            .collect::<Result<Vec<_>, _>>()
-    }
-
     /// Handles event creation state machine
     async fn handle_event_creation(
         &mut self,
@@ -347,7 +301,7 @@ impl Bot {
         chat_id: i64,
         draft: &EventDraft,
     ) -> Result<(), BotError> {
-        sqlx::query(
+        let event_id = sqlx::query(
             r#"
             INSERT INTO events (creator, title, description, location, event_date, chat_id)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -360,11 +314,109 @@ impl Bot {
         .bind(&draft.datetime)
         .bind(chat_id)
         .execute(&self.pool)
-        .await?;
+        .await?
+        .last_insert_rowid();
+
+        // Fetch and display the event
+        let event = self.fetch_event(event_id).await?;
 
         self.send_message(chat_id, "The Event has been saved.")
             .await?;
+        self.list_event(chat_id, &event).await?;
+
         Ok(())
+    }
+
+    /// List a single event in chat with RSVP buttons
+    async fn list_event(&self, chat_id: i64, event: &Event) -> Result<(), BotError> {
+        let params = SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text(event.format_message())
+            .reply_markup(ReplyMarkup::InlineKeyboardMarkup(event.create_keyboard()))
+            .build();
+
+        self.api.send_message(&params)?;
+        Ok(())
+    }
+
+    /// Lists all events in a chat
+    async fn list_events(&self, chat_id: i64) -> Result<(), BotError> {
+        let events = self.fetch_events(chat_id).await?;
+
+        if events.is_empty() {
+            self.send_message(chat_id, "No events scheduled.").await?;
+            return Ok(());
+        }
+
+        for event in events {
+            self.list_event(chat_id, &event).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Fetches a single event by ID with its attendee count
+    async fn fetch_event(&self, event_id: i64) -> Result<Event, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT 
+                id,
+                title,
+                description,
+                location,
+                event_date,
+                creator,
+                (SELECT COUNT(*) FROM attendees WHERE event_id = events.id) as attendee_count
+            FROM events 
+            WHERE id = ?
+            "#,
+        )
+        .bind(event_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Event::from_row(row)
+    }
+
+    /// Fetches events from the database
+    async fn fetch_events(&self, chat_id: i64) -> Result<Vec<Event>, sqlx::Error> {
+        let event_ids = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM events WHERE chat_id = ? ORDER BY event_date",
+        )
+        .bind(chat_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut events = Vec::with_capacity(event_ids.len());
+        for id in event_ids {
+            events.push(self.fetch_event(id).await?);
+        }
+        Ok(events)
+    }
+
+    /// Toggles a user's attendance for an event
+    async fn toggle_attendance(&self, event_id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
+        let exists = sqlx::query("SELECT 1 FROM attendees WHERE event_id = ? AND user_id = ?")
+            .bind(event_id)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if exists.is_some() {
+            sqlx::query("DELETE FROM attendees WHERE event_id = ? AND user_id = ?")
+                .bind(event_id)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(false)
+        } else {
+            sqlx::query("INSERT INTO attendees (event_id, user_id) VALUES (?, ?)")
+                .bind(event_id)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(true)
+        }
     }
 
     /// Handles callback queries (e.g., RSVP button clicks)
@@ -407,34 +459,14 @@ impl Bot {
                     }
                 };
 
-                // Query just this event's updated information
-                let event = sqlx::query(
-                    r#"
-                    SELECT 
-                        id,
-                        title,
-                        description,
-                        location,
-                        event_date,
-                        creator,
-                        (SELECT COUNT(*) FROM attendees WHERE event_id = events.id) as attendee_count
-                    FROM events 
-                    WHERE id = ?
-                    "#,
-                )
-                .bind(event_id)
-                .fetch_one(&self.pool)
-                .await?;
-
-                let event = Event::from_row(event)?;
-                let message = event.format_message();
-                let keyboard = event.create_keyboard();
+                // Fetch and update the event message
+                let event = self.fetch_event(event_id).await?;
 
                 let edit_params = EditMessageTextParams::builder()
                     .chat_id(chat_id)
                     .message_id(message_id)
-                    .text(message)
-                    .reply_markup(keyboard)
+                    .text(event.format_message())
+                    .reply_markup(event.create_keyboard())
                     .build();
 
                 self.api.edit_message_text(&edit_params)?;
@@ -442,31 +474,6 @@ impl Bot {
         }
 
         Ok(())
-    }
-
-    /// Toggles a user's attendance for an event
-    async fn toggle_attendance(&self, event_id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
-        let exists = sqlx::query("SELECT 1 FROM attendees WHERE event_id = ? AND user_id = ?")
-            .bind(event_id)
-            .bind(user_id)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        if exists.is_some() {
-            sqlx::query("DELETE FROM attendees WHERE event_id = ? AND user_id = ?")
-                .bind(event_id)
-                .bind(user_id)
-                .execute(&self.pool)
-                .await?;
-            Ok(false)
-        } else {
-            sqlx::query("INSERT INTO attendees (event_id, user_id) VALUES (?, ?)")
-                .bind(event_id)
-                .bind(user_id)
-                .execute(&self.pool)
-                .await?;
-            Ok(true)
-        }
     }
 
     /// Main event loop for the bot
