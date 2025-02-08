@@ -227,6 +227,7 @@ impl Bot {
         match text.as_str() {
             "/start" => self.handle_start(user_id, chat_id, is_private).await?,
             "/list" => self.list_events(chat_id).await?,
+            "/cancel" => self.handle_cancel(user_id, chat_id).await?,
             _ if is_private && self.event_contexts.contains_key(&user_id) => {
                 self.handle_event_creation(user_id, chat_id, &text).await?
             }
@@ -260,8 +261,11 @@ impl Bot {
             },
         );
 
-        self.send_message(user_id, "Please enter the Title of the event.")
-            .await?;
+        self.send_message(
+            user_id,
+            "Please enter the Title of the event. To exit, type /cancel.",
+        )
+        .await?;
 
         Ok(())
     }
@@ -357,6 +361,15 @@ impl Bot {
 
         self.list_event(chat_id, &event).await?;
 
+        Ok(())
+    }
+
+    /// Cancels ongoing event creation
+    async fn handle_cancel(&mut self, user_id: i64, chat_id: i64) -> Result<(), BotError> {
+        if self.event_contexts.remove(&user_id).is_some() {
+            self.send_message(chat_id, "Event creation cancelled.")
+                .await?;
+        }
         Ok(())
     }
 
