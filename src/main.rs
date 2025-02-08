@@ -76,6 +76,14 @@ struct EventDraft {
     datetime: String,
 }
 
+/// Represents the context of event creation
+#[derive(Clone, Debug)]
+struct EventContext {
+    origin_chat_id: i64, // The group chat where /start was initiated
+    draft: EventDraft,
+    state: EventCreationState,
+}
+
 /// Represents a fully formed event from the database
 #[derive(Debug)]
 struct Event {
@@ -137,8 +145,7 @@ impl Event {
 struct Bot {
     api: Api,
     pool: SqlitePool,
-    user_states: HashMap<i64, EventCreationState>,
-    user_drafts: HashMap<i64, EventDraft>,
+    event_contexts: HashMap<i64, EventContext>,
 }
 
 impl Bot {
@@ -150,8 +157,7 @@ impl Bot {
         Ok(Self {
             api: Api::new(token),
             pool,
-            user_states: HashMap::new(),
-            user_drafts: HashMap::new(),
+            event_contexts: HashMap::new(),
         })
     }
 
@@ -211,6 +217,7 @@ impl Bot {
             .map(|user| user.id as i64)
             .unwrap_or_default();
         let chat_id = message.chat.id;
+        let is_private = message.chat.type_field == frankenstein::ChatType::Private;
 
         let text = match message.text {
             Some(text) => text,
@@ -218,21 +225,44 @@ impl Bot {
         };
 
         match text.as_str() {
-            "/start" => self.handle_start(user_id, chat_id).await?,
+            "/start" => self.handle_start(user_id, chat_id, is_private).await?,
             "/list" => self.list_events(chat_id).await?,
-            _ => self.handle_event_creation(user_id, chat_id, &text).await?,
+            _ if is_private && self.event_contexts.contains_key(&user_id) => {
+                self.handle_event_creation(user_id, chat_id, &text).await?
+            }
+            _ => {}
         }
 
         Ok(())
     }
 
-    /// Handles the /start command
-    async fn handle_start(&mut self, user_id: i64, chat_id: i64) -> Result<(), BotError> {
-        self.user_states
-            .insert(user_id, EventCreationState::AwaitingTitle);
-        self.user_drafts.insert(user_id, EventDraft::default());
-        self.send_message(chat_id, "Please enter the Title of the event.")
+    /// Handles the /start command, redirecting to private chat if needed
+    async fn handle_start(
+        &mut self,
+        user_id: i64,
+        chat_id: i64,
+        is_private: bool,
+    ) -> Result<(), BotError> {
+        if is_private {
+            self.send_message(
+                chat_id,
+                "Please initiate event creation in a group chat. Ask the group admin to invite me to the group chat."
+            ).await?;
+            return Ok(());
+        }
+
+        self.event_contexts.insert(
+            user_id,
+            EventContext {
+                origin_chat_id: chat_id,
+                draft: EventDraft::default(),
+                state: EventCreationState::AwaitingTitle,
+            },
+        );
+
+        self.send_message(user_id, "Please enter the Title of the event.")
             .await?;
+
         Ok(())
     }
 
@@ -243,51 +273,56 @@ impl Bot {
         chat_id: i64,
         text: &str,
     ) -> Result<(), BotError> {
-        let state = match self.user_states.get(&user_id) {
-            Some(state) => state.clone(),
+        let context = match self.event_contexts.get_mut(&user_id) {
+            Some(context) => context,
             None => return Ok(()),
         };
 
-        // Update draft first
-        if let Some(draft) = self.user_drafts.get_mut(&user_id) {
-            match state {
-                EventCreationState::AwaitingTitle => draft.title = text.to_string(),
-                EventCreationState::AwaitingDescription => draft.description = text.to_string(),
-                EventCreationState::AwaitingLocation => draft.location = text.to_string(),
-                EventCreationState::AwaitingTime => draft.datetime = text.to_string(),
-            }
-        }
-
-        // Then handle state transition and messages
-        match state {
+        // Update draft based on state
+        match context.state {
             EventCreationState::AwaitingTitle => {
-                self.user_states
-                    .insert(user_id, EventCreationState::AwaitingDescription);
+                context.draft.title = text.to_string();
+                context.state = EventCreationState::AwaitingDescription;
                 self.send_message(chat_id, "Please enter an Event description.")
                     .await?;
             }
             EventCreationState::AwaitingDescription => {
-                self.user_states
-                    .insert(user_id, EventCreationState::AwaitingLocation);
+                context.draft.description = text.to_string();
+                context.state = EventCreationState::AwaitingLocation;
                 self.send_message(chat_id, "Please enter the Location of the event.")
                     .await?;
             }
             EventCreationState::AwaitingLocation => {
-                self.user_states
-                    .insert(user_id, EventCreationState::AwaitingTime);
-                self.send_message(chat_id, "Please enter the Time the event takes place.")
-                    .await?;
+                context.draft.location = text.to_string();
+                context.state = EventCreationState::AwaitingTime;
+                self.send_message(
+                    chat_id,
+                    "Please enter the Date and Time the event takes place.",
+                )
+                .await?;
             }
             EventCreationState::AwaitingTime => {
-                let draft = self
-                    .user_drafts
-                    .get(&user_id)
-                    .cloned()
-                    .ok_or_else(|| BotError::MissingDraft)?;
+                context.draft.datetime = text.to_string();
 
-                self.create_event(user_id, chat_id, &draft).await?;
-                self.user_states.remove(&user_id);
-                self.user_drafts.remove(&user_id);
+                // Get the context before removing it
+                let EventContext {
+                    origin_chat_id,
+                    draft,
+                    ..
+                } = self
+                    .event_contexts
+                    .remove(&user_id)
+                    .ok_or(BotError::MissingDraft)?;
+
+                // Create the event
+                self.create_event(user_id, origin_chat_id, &draft).await?;
+
+                // Confirm in private chat
+                self.send_message(
+                    chat_id,
+                    "The Event has been created and posted to the group!",
+                )
+                .await?;
             }
         }
 
@@ -320,8 +355,6 @@ impl Bot {
         // Fetch and display the event
         let event = self.fetch_event(event_id).await?;
 
-        self.send_message(chat_id, "The Event has been saved.")
-            .await?;
         self.list_event(chat_id, &event).await?;
 
         Ok(())
