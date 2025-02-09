@@ -1,7 +1,7 @@
 use frankenstein::{
     AllowedUpdate, Api, CallbackQuery, ChatMember, EditMessageTextParams, GetUpdatesParams,
-    InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage, Message, ReplyMarkup,
-    SendMessageParams, TelegramApi, UpdateContent,
+    InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage, Message, ParseMode,
+    ReplyMarkup, SendMessageParams, TelegramApi, UpdateContent,
 };
 use sqlx::{Row, SqlitePool};
 use std::{collections::HashMap, fmt, str::FromStr};
@@ -101,25 +101,27 @@ impl Event {
     /// Creates a formatted message for Telegram display
     fn format_message(&self) -> String {
         let mut message = format!(
-            "🎯 {}\n📝 {}\n📍 {}\n⏰ {}\n\n",
-            self.title, self.description, self.location, self.event_date,
+            "*__{}__*\n{}\n\n⏰ {}\n📍 {}\n",
+            Self::escape_markdown(&self.title),
+            Self::escape_markdown(&self.description),
+            Self::escape_markdown(&self.event_date),
+            Self::escape_markdown(&self.location),
         );
 
         if !self.accepted.is_empty() {
-            message.push_str("\n✅ Accepted:\n");
+            message.push_str("\n✅ Accepted\n");
             for (_, user_name) in &self.accepted {
                 message.push_str(&format!("• {}\n", user_name));
             }
         }
 
         if !self.declined.is_empty() {
-            message.push_str("\n❌ Declined:\n");
+            message.push_str("\n❌ Declined\n");
             for (_, user_name) in &self.declined {
                 message.push_str(&format!("• {}\n", user_name));
             }
         }
 
-        message.push_str(&format!("\n🆔 {}", self.id));
         message
     }
 
@@ -152,6 +154,28 @@ impl Event {
             accepted: Vec::new(),
             declined: Vec::new(),
         })
+    }
+
+    /// Escapes special characters for Telegram MarkdownV2 format
+    fn escape_markdown(text: &str) -> String {
+        text.replace('_', r"\_")
+            .replace('*', r"\*")
+            .replace('[', r"\[")
+            .replace(']', r"\]")
+            .replace('(', r"\(")
+            .replace(')', r"\)")
+            .replace('~', r"\~")
+            .replace('`', r"\`")
+            .replace('>', r"\>")
+            .replace('#', r"\#")
+            .replace('+', r"\+")
+            .replace('-', r"\-")
+            .replace('=', r"\=")
+            .replace('|', r"\|")
+            .replace('{', r"\{")
+            .replace('}', r"\}")
+            .replace('.', r"\.")
+            .replace('!', r"\!")
     }
 }
 
@@ -394,6 +418,7 @@ impl Bot {
         let params = SendMessageParams::builder()
             .chat_id(chat_id)
             .text(event.format_message())
+            .parse_mode(ParseMode::MarkdownV2)
             .reply_markup(ReplyMarkup::InlineKeyboardMarkup(event.create_keyboard()))
             .build();
 
@@ -583,6 +608,7 @@ impl Bot {
                     .chat_id(chat_id)
                     .message_id(message_id)
                     .text(event.format_message())
+                    .parse_mode(ParseMode::MarkdownV2)
                     .reply_markup(event.create_keyboard())
                     .build();
 
