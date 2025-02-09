@@ -243,6 +243,7 @@ impl Bot {
             "/create" => self.handle_create(user_id, chat_id, is_private).await?,
             "/list" => self.list_events(chat_id).await?,
             "/cancel" => self.handle_cancel(user_id, chat_id).await?,
+            "/help" => self.handle_help(chat_id).await?,
             _ if is_private && self.event_contexts.contains_key(&user_id) => {
                 self.handle_event_creation(user_id, chat_id, &text).await?
             }
@@ -589,6 +590,26 @@ impl Bot {
             }
         }
 
+        Ok(())
+    }
+
+    /// Shows help message
+    async fn handle_help(&self, chat_id: i64) -> Result<(), BotError> {
+        let help_text = r#"
+Available commands:
+    /create - Start creating a new event
+    /cancel - Cancel event creation in progress
+    /list - Show all events in this chat
+    /help - Show this help message
+
+To create an event:
+    1. Use /create in a group chat
+    2. Bot will message you privately
+    3. Follow the prompts to create the event
+    4. Event will be posted in the group chat where you started
+            "#;
+
+        self.send_message(chat_id, help_text).await?;
         Ok(())
     }
 
