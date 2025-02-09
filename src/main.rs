@@ -1,7 +1,7 @@
 use frankenstein::{
-    AllowedUpdate, AnswerCallbackQueryParams, Api, CallbackQuery, EditMessageTextParams,
-    GetUpdatesParams, InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage,
-    Message, ReplyMarkup, SendMessageParams, TelegramApi, UpdateContent,
+    AllowedUpdate, AnswerCallbackQueryParams, Api, CallbackQuery, ChatMember,
+    EditMessageTextParams, GetUpdatesParams, InlineKeyboardButton, InlineKeyboardMarkup,
+    MaybeInaccessibleMessage, Message, ReplyMarkup, SendMessageParams, TelegramApi, UpdateContent,
 };
 use sqlx::{Row, SqlitePool};
 use std::{collections::HashMap, fmt, str::FromStr};
@@ -93,33 +93,46 @@ struct Event {
     location: String,
     event_date: String,
     creator: i64,
-    attendee_count: i64,
+    accepted: Vec<(i64, String)>,
+    declined: Vec<(i64, String)>,
 }
 
 impl Event {
     /// Creates a formatted message for Telegram display
     fn format_message(&self) -> String {
-        format!(
-            "🎯 {}\n📝 {}\n📍 {}\n⏰ {}\n👥 {} attending\n🆔 {}",
-            self.title,
-            self.description,
-            self.location,
-            self.event_date,
-            self.attendee_count,
-            self.id
-        )
+        let mut message = format!(
+            "🎯 {}\n📝 {}\n📍 {}\n⏰ {}\n\n",
+            self.title, self.description, self.location, self.event_date,
+        );
+
+        if !self.accepted.is_empty() {
+            message.push_str("\n✅ Accepted:\n");
+            for (_, user_name) in &self.accepted {
+                message.push_str(&format!("• {}\n", user_name));
+            }
+        }
+
+        if !self.declined.is_empty() {
+            message.push_str("\n❌ Declined:\n");
+            for (_, user_name) in &self.declined {
+                message.push_str(&format!("• {}\n", user_name));
+            }
+        }
+
+        message.push_str(&format!("\n🆔 {}", self.id));
+        message
     }
 
     /// Creates RSVP keyboard buttons for this event
     fn create_keyboard(&self) -> InlineKeyboardMarkup {
         let accept_button = InlineKeyboardButton::builder()
             .text("✅ Accept")
-            .callback_data(format!("accept_{}", self.id))
+            .callback_data(format!("accepted_{}", self.id))
             .build();
 
         let decline_button = InlineKeyboardButton::builder()
             .text("❌ Decline")
-            .callback_data(format!("decline_{}", self.id))
+            .callback_data(format!("declined_{}", self.id))
             .build();
 
         InlineKeyboardMarkup::builder()
@@ -136,7 +149,8 @@ impl Event {
             location: row.get("location"),
             event_date: row.get("event_date"),
             creator: row.get("creator"),
-            attendee_count: row.get("attendee_count"),
+            accepted: Vec::new(),
+            declined: Vec::new(),
         })
     }
 }
@@ -188,6 +202,7 @@ impl Bot {
             CREATE TABLE IF NOT EXISTS attendees (
                 event_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('accepted', 'declined')),
                 PRIMARY KEY (event_id, user_id),
                 FOREIGN KEY (event_id) REFERENCES events (id)
             )
@@ -401,6 +416,30 @@ impl Bot {
         Ok(())
     }
 
+    /// Fetches a user's full name from Telegram
+    async fn get_user_name(&self, chat_id: i64, user_id: i64) -> Result<String, BotError> {
+        let params = frankenstein::GetChatMemberParams::builder()
+            .chat_id(chat_id)
+            .user_id(user_id as u64)
+            .build();
+
+        let response = self.api.get_chat_member(&params)?;
+        let user = match response.result {
+            ChatMember::Member(member) => member.user,
+            ChatMember::Administrator(admin) => admin.user,
+            ChatMember::Creator(creator) => creator.user,
+            ChatMember::Restricted(restricted) => restricted.user,
+            ChatMember::Left(left) => left.user,
+            ChatMember::Kicked(kicked) => kicked.user,
+        };
+
+        Ok(if let Some(last_name) = user.last_name {
+            format!("{} {}", user.first_name, last_name)
+        } else {
+            user.first_name
+        })
+    }
+
     /// Fetches a single event by ID with its attendee count
     async fn fetch_event(&self, event_id: i64) -> Result<Event, sqlx::Error> {
         let row = sqlx::query(
@@ -412,7 +451,7 @@ impl Bot {
                 location,
                 event_date,
                 creator,
-                (SELECT COUNT(*) FROM attendees WHERE event_id = events.id) as attendee_count
+                chat_id
             FROM events 
             WHERE id = ?
             "#,
@@ -421,7 +460,34 @@ impl Bot {
         .fetch_one(&self.pool)
         .await?;
 
-        Event::from_row(row)
+        let chat_id: i64 = row.get("chat_id");
+        let mut event = Event::from_row(row)?;
+
+        let attendees = sqlx::query("SELECT user_id, status FROM attendees WHERE event_id = ?")
+            .bind(event_id)
+            .fetch_all(&self.pool)
+            .await?;
+
+        for attendee in attendees {
+            let user_id: i64 = attendee.get("user_id");
+            let status: String = attendee.get("status");
+
+            let name = match self.get_user_name(chat_id, user_id).await {
+                Ok(name) => name,
+                Err(e) => {
+                    eprintln!("Failed to fetch user info for {}: {}", user_id, e);
+                    format!("User {}", user_id)
+                }
+            };
+
+            match status.as_str() {
+                "accepted" => event.accepted.push((user_id, name)),
+                "declined" => event.declined.push((user_id, name)),
+                _ => {} // Should never happen due to CHECK constraint
+            }
+        }
+
+        Ok(event)
     }
 
     /// Fetches events from the database
@@ -441,27 +507,50 @@ impl Bot {
     }
 
     /// Toggles a user's attendance for an event
-    async fn toggle_attendance(&self, event_id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
-        let exists = sqlx::query("SELECT 1 FROM attendees WHERE event_id = ? AND user_id = ?")
+    async fn update_attendance(
+        &self,
+        event_id: i64,
+        user_id: i64,
+        status: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let exists = sqlx::query("SELECT status FROM attendees WHERE event_id = ? AND user_id = ?")
             .bind(event_id)
             .bind(user_id)
             .fetch_optional(&self.pool)
             .await?;
 
-        if exists.is_some() {
-            sqlx::query("DELETE FROM attendees WHERE event_id = ? AND user_id = ?")
-                .bind(event_id)
-                .bind(user_id)
-                .execute(&self.pool)
-                .await?;
-            Ok(false)
-        } else {
-            sqlx::query("INSERT INTO attendees (event_id, user_id) VALUES (?, ?)")
-                .bind(event_id)
-                .bind(user_id)
-                .execute(&self.pool)
-                .await?;
-            Ok(true)
+        match exists {
+            Some(row) => {
+                let current_status: String = row.get("status");
+                // If clicking same status, remove the status
+                if current_status == status {
+                    sqlx::query("DELETE FROM attendees WHERE event_id = ? AND user_id = ?")
+                        .bind(event_id)
+                        .bind(user_id)
+                        .execute(&self.pool)
+                        .await?;
+                } else {
+                    // Otherwise update to new status
+                    sqlx::query(
+                        "UPDATE attendees SET status = ? WHERE event_id = ? AND user_id = ?",
+                    )
+                    .bind(status)
+                    .bind(event_id)
+                    .bind(user_id)
+                    .execute(&self.pool)
+                    .await?;
+                }
+                Ok(status == "accepted")
+            }
+            None => {
+                sqlx::query("INSERT INTO attendees (event_id, user_id, status) VALUES (?, ?, ?)")
+                    .bind(event_id)
+                    .bind(user_id)
+                    .bind(status)
+                    .execute(&self.pool)
+                    .await?;
+                Ok(true)
+            }
         }
     }
 
@@ -472,14 +561,11 @@ impl Bot {
         let data = callback_query.data.unwrap_or_default();
         let user_id = callback_query.from.id as i64;
 
-        if data.starts_with("accept_") || data.starts_with("decline_") {
+        if data.starts_with("accepted_") || data.starts_with("declined_") {
             println!("Processing RSVP/cancel for event");
-            let event_id = data
-                .split('_')
-                .nth(1)
-                .ok_or(BotError::MissingDraft)?
-                .parse::<i64>()?;
-            let is_attending = self.toggle_attendance(event_id, user_id).await?;
+            let (status, event_id) = data.split_once('_').ok_or(BotError::MissingDraft)?;
+            let event_id: i64 = event_id.parse()?;
+            let is_attending = self.update_attendance(event_id, user_id, status).await?;
 
             // Answer the callback query
             let answer_text = if is_attending {
