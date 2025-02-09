@@ -79,7 +79,7 @@ struct EventDraft {
 /// Represents the context of event creation
 #[derive(Clone, Debug)]
 struct EventContext {
-    origin_chat_id: i64, // The group chat where /start was initiated
+    origin_chat_id: i64, // The group chat where /create was initiated
     draft: EventDraft,
     state: EventCreationState,
 }
@@ -240,7 +240,7 @@ impl Bot {
         };
 
         match text.as_str() {
-            "/start" => self.handle_start(user_id, chat_id, is_private).await?,
+            "/create" => self.handle_create(user_id, chat_id, is_private).await?,
             "/list" => self.list_events(chat_id).await?,
             "/cancel" => self.handle_cancel(user_id, chat_id).await?,
             _ if is_private && self.event_contexts.contains_key(&user_id) => {
@@ -252,8 +252,8 @@ impl Bot {
         Ok(())
     }
 
-    /// Handles the /start command, redirecting to private chat if needed
-    async fn handle_start(
+    /// Handles the /create command, redirecting to private chat if needed
+    async fn handle_create(
         &mut self,
         user_id: i64,
         chat_id: i64,
