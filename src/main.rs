@@ -1,7 +1,7 @@
 use frankenstein::{
-    AllowedUpdate, AnswerCallbackQueryParams, Api, CallbackQuery, ChatMember,
-    EditMessageTextParams, GetUpdatesParams, InlineKeyboardButton, InlineKeyboardMarkup,
-    MaybeInaccessibleMessage, Message, ReplyMarkup, SendMessageParams, TelegramApi, UpdateContent,
+    AllowedUpdate, Api, CallbackQuery, ChatMember, EditMessageTextParams, GetUpdatesParams,
+    InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage, Message, ReplyMarkup,
+    SendMessageParams, TelegramApi, UpdateContent,
 };
 use sqlx::{Row, SqlitePool};
 use std::{collections::HashMap, fmt, str::FromStr};
@@ -512,7 +512,7 @@ impl Bot {
         event_id: i64,
         user_id: i64,
         status: &str,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<(), sqlx::Error> {
         let exists = sqlx::query("SELECT status FROM attendees WHERE event_id = ? AND user_id = ?")
             .bind(event_id)
             .bind(user_id)
@@ -540,7 +540,6 @@ impl Bot {
                     .execute(&self.pool)
                     .await?;
                 }
-                Ok(status == "accepted")
             }
             None => {
                 sqlx::query("INSERT INTO attendees (event_id, user_id, status) VALUES (?, ?, ?)")
@@ -549,9 +548,9 @@ impl Bot {
                     .bind(status)
                     .execute(&self.pool)
                     .await?;
-                Ok(true)
             }
         }
+        Ok(())
     }
 
     /// Handles callback queries (e.g., RSVP button clicks)
@@ -565,22 +564,7 @@ impl Bot {
             println!("Processing RSVP/cancel for event");
             let (status, event_id) = data.split_once('_').ok_or(BotError::MissingDraft)?;
             let event_id: i64 = event_id.parse()?;
-            let is_attending = self.update_attendance(event_id, user_id, status).await?;
-
-            // Answer the callback query
-            let answer_text = if is_attending {
-                "You're now attending this event!"
-            } else {
-                "You've cancelled your RSVP."
-            };
-
-            let answer_params = AnswerCallbackQueryParams::builder()
-                .callback_query_id(callback_query.id)
-                .text(answer_text)
-                .show_alert(true)
-                .build();
-
-            self.api.answer_callback_query(&answer_params)?;
+            self.update_attendance(event_id, user_id, status).await?;
 
             // Update just this event's message
             if let Some(message) = callback_query.message {
