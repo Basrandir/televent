@@ -581,13 +581,10 @@ impl Bot {
 
     /// Handles callback queries (e.g., RSVP button clicks)
     async fn handle_callback_query(&self, callback_query: CallbackQuery) -> Result<(), BotError> {
-        println!("Received callback query: {:?}", callback_query.data);
-
         let data = callback_query.data.unwrap_or_default();
         let user_id = callback_query.from.id as i64;
 
         if data.starts_with("accepted_") || data.starts_with("declined_") {
-            println!("Processing RSVP/cancel for event");
             let (status, event_id) = data.split_once('_').ok_or(BotError::MissingDraft)?;
             let event_id: i64 = event_id.parse()?;
             self.update_attendance(event_id, user_id, status).await?;
