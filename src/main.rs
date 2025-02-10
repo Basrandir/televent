@@ -285,29 +285,43 @@ impl Bot {
         is_private: bool,
     ) -> Result<(), BotError> {
         if is_private {
-            self.send_message(
+            return self.send_message(
                 chat_id,
                 "Please initiate event creation in a group chat. Ask the group admin to invite me to the group chat."
-            ).await?;
-            return Ok(());
+            ).await;
         }
 
-        self.event_contexts.insert(
-            user_id,
-            EventContext {
-                origin_chat_id: chat_id,
-                draft: EventDraft::default(),
-                state: EventCreationState::AwaitingTitle,
-            },
-        );
+        // Try to message the user privately
+        let private_msg_result = self
+            .send_message(
+                user_id,
+                "Please enter the Title of the event. To exit, type /cancel.",
+            )
+            .await;
 
-        self.send_message(
-            user_id,
-            "Please enter the Title of the event. To exit, type /cancel.",
-        )
-        .await?;
-
-        Ok(())
+        match private_msg_result {
+            Ok(()) => {
+                self.event_contexts.insert(
+                    user_id,
+                    EventContext {
+                        origin_chat_id: chat_id,
+                        draft: EventDraft::default(),
+                        state: EventCreationState::AwaitingTitle,
+                    },
+                );
+                Ok(())
+            }
+            Err(BotError::Telegram(frankenstein::Error::Api(e))) if e.error_code == 403 => {
+                const HELP_MESSAGE: &str = concat!(
+                    "To create an event, you need to start a private chat with me first.\n\n",
+                    "1. Click here: @Mississauga_Maybes_Bot\n",
+                    "2. Click 'Start' or send any message\n",
+                    "3. Come back to this group and try /create again"
+                );
+                self.send_message(chat_id, HELP_MESSAGE).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Handles event creation state machine
