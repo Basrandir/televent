@@ -623,10 +623,18 @@ impl Bot {
                     .reply_markup(event.create_keyboard())
                     .build();
 
-                self.api.edit_message_text(&edit_params)?;
+                return match self.api.edit_message_text(&edit_params) {
+                    Ok(_) => Ok(()),
+                    Err(frankenstein::Error::Api(e))
+                        if e.error_code == 400
+                            && e.description.contains("message is not modified") =>
+                    {
+                        Ok(())
+                    }
+                    Err(e) => Err(BotError::Telegram(e)),
+                };
             }
         }
-
         Ok(())
     }
 
