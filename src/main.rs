@@ -378,10 +378,7 @@ impl Bot {
                     .remove(&user_id)
                     .ok_or(BotError::MissingDraft)?;
 
-                // Create the event
                 self.create_event(user_id, origin_chat_id, &draft).await?;
-
-                // Confirm in private chat
                 self.send_message(
                     chat_id,
                     "The Event has been created and posted to the group!",
@@ -416,9 +413,7 @@ impl Bot {
         .await?
         .last_insert_rowid();
 
-        // Fetch and display the event
         let event = self.fetch_event(event_id).await?;
-
         self.list_event(chat_id, &event, creator, true).await?;
 
         Ok(())
@@ -432,7 +427,6 @@ impl Bot {
             .execute(&self.pool)
             .await?;
 
-        // Then delete the event
         sqlx::query("DELETE FROM events WHERE id = ?")
             .bind(event_id)
             .execute(&self.pool)
