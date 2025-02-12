@@ -174,7 +174,7 @@ impl Event {
             '!',
         ];
         let mut escaped = String::with_capacity(text.len());
-        
+
         for ch in text.chars() {
             if special_chars.contains(&ch) {
                 escaped.push('\\');
@@ -273,6 +273,7 @@ impl Bot {
             "/create" => self.handle_create(user_id, chat_id, is_private).await?,
             "/list" => self.list_events(chat_id, user_id).await?,
             "/cancel" => self.handle_cancel(user_id, chat_id).await?,
+            "/myevents" => self.list_my_events(user_id).await?,
             "/help" => self.handle_help(chat_id).await?,
             _ if is_private && self.event_contexts.contains_key(&user_id) => {
                 self.handle_event_creation(user_id, chat_id, &text).await?
@@ -415,6 +416,7 @@ impl Bot {
 
         let event = self.fetch_event(event_id).await?;
         self.list_event(chat_id, &event, creator, true).await?;
+        self.list_event(creator, &event, creator, false).await?;
 
         Ok(())
     }
@@ -571,6 +573,26 @@ impl Bot {
         Ok(events)
     }
 
+    async fn list_my_events(&self, user_id: i64) -> Result<(), BotError> {
+        let event_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM events WHERE creator = ?")
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await?;
+
+        if event_ids.is_empty() {
+            self.send_message(user_id, "You have not created any events.")
+                .await?;
+            return Ok(());
+        }
+
+        for id in event_ids {
+            let event = self.fetch_event(id).await?;
+            self.list_event(user_id, &event, user_id, false).await?;
+        }
+
+        Ok(())
+    }
+
     /// Toggles a user's attendance for an event
     async fn update_attendance(
         &self,
@@ -626,6 +648,18 @@ impl Bot {
         if data.starts_with("accepted_") || data.starts_with("declined_") {
             let (status, event_id) = data.split_once('_').ok_or(BotError::MissingDraft)?;
             let event_id: i64 = event_id.parse()?;
+
+            let _ = match self.fetch_event(event_id).await {
+                Ok(event) => event,
+                Err(e) => {
+                    if let sqlx::Error::RowNotFound = e {
+                        return Ok(());
+                    } else {
+                        return Err(BotError::Database(e));
+                    }
+                }
+            };
+
             self.update_attendance(event_id, user_id, status).await?;
 
             // Update just this event's message
@@ -641,7 +675,6 @@ impl Bot {
                     }
                 };
 
-                // Fetch and update the event message
                 let event = self.fetch_event(event_id).await?;
 
                 let edit_params = EditMessageTextParams::builder()
@@ -670,7 +703,17 @@ impl Bot {
                 .1
                 .parse()?;
 
-            let event = self.fetch_event(event_id).await?;
+            let event = match self.fetch_event(event_id).await {
+                Ok(event) => event,
+                Err(e) => {
+                    if let sqlx::Error::RowNotFound = e {
+                        return Ok(());
+                    } else {
+                        return Err(BotError::Database(e));
+                    }
+                }
+            };
+
             if event.creator != user_id {
                 return Ok(()); // Silently ignore if not event creator (others should not even see the Delete button)
             }
