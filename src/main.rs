@@ -169,24 +169,19 @@ impl Event {
 
     /// Escapes special characters for Telegram MarkdownV2 format
     fn escape_markdown(text: &str) -> String {
-        text.replace('_', r"\_")
-            .replace('*', r"\*")
-            .replace('[', r"\[")
-            .replace(']', r"\]")
-            .replace('(', r"\(")
-            .replace(')', r"\)")
-            .replace('~', r"\~")
-            .replace('`', r"\`")
-            .replace('>', r"\>")
-            .replace('#', r"\#")
-            .replace('+', r"\+")
-            .replace('-', r"\-")
-            .replace('=', r"\=")
-            .replace('|', r"\|")
-            .replace('{', r"\{")
-            .replace('}', r"\}")
-            .replace('.', r"\.")
-            .replace('!', r"\!")
+        let special_chars = [
+            '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.',
+            '!',
+        ];
+        let mut escaped = String::with_capacity(text.len());
+        
+        for ch in text.chars() {
+            if special_chars.contains(&ch) {
+                escaped.push('\\');
+            }
+            escaped.push(ch);
+        }
+        escaped
     }
 }
 
