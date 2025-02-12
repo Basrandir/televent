@@ -756,6 +756,7 @@ Available commands:
     /create - Start creating a new event
     /cancel - Cancel event creation in progress
     /list - Show all events in this chat
+    /myevents - Show me all the events I've created
     /help - Show this help message
 
 To create an event:
