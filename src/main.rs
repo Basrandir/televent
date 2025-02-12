@@ -126,7 +126,7 @@ impl Event {
     }
 
     /// Creates RSVP keyboard buttons for this event
-    fn create_keyboard(&self) -> InlineKeyboardMarkup {
+    fn create_keyboard(&self, viewer_id: i64, public: bool) -> InlineKeyboardMarkup {
         let accept_button = InlineKeyboardButton::builder()
             .text("✅ Accept")
             .callback_data(format!("accepted_{}", self.id))
@@ -137,12 +137,23 @@ impl Event {
             .callback_data(format!("declined_{}", self.id))
             .build();
 
+        let mut keyboard = vec![vec![accept_button, decline_button]];
+
+        if !public && self.creator == viewer_id {
+            let delete_button = InlineKeyboardButton::builder()
+                .text("🗑️ Delete")
+                .callback_data(format!("deleted_{}", self.id))
+                .build();
+
+            keyboard.push(vec![delete_button]);
+        }
+
         InlineKeyboardMarkup::builder()
-            .inline_keyboard(vec![vec![accept_button, decline_button]])
+            .inline_keyboard(keyboard)
             .build()
     }
 
-    /// Loads an event from a database row
+    /// Creates an Event from a database row
     fn from_row(row: sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
             id: row.get("id"),
@@ -265,7 +276,7 @@ impl Bot {
 
         match text.as_str() {
             "/create" => self.handle_create(user_id, chat_id, is_private).await?,
-            "/list" => self.list_events(chat_id).await?,
+            "/list" => self.list_events(chat_id, user_id).await?,
             "/cancel" => self.handle_cancel(user_id, chat_id).await?,
             "/help" => self.handle_help(chat_id).await?,
             _ if is_private && self.event_contexts.contains_key(&user_id) => {
@@ -413,7 +424,24 @@ impl Bot {
         // Fetch and display the event
         let event = self.fetch_event(event_id).await?;
 
-        self.list_event(chat_id, &event).await?;
+        self.list_event(chat_id, &event, creator, true).await?;
+
+        Ok(())
+    }
+
+    /// Deletes an event
+    async fn delete_event(&self, event_id: i64) -> Result<(), BotError> {
+        // First delete attendees due to foreign key constraint
+        sqlx::query("DELETE FROM attendees WHERE event_id = ?")
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?;
+
+        // Then delete the event
+        sqlx::query("DELETE FROM events WHERE id = ?")
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -428,12 +456,20 @@ impl Bot {
     }
 
     /// List a single event in chat with RSVP buttons
-    async fn list_event(&self, chat_id: i64, event: &Event) -> Result<(), BotError> {
+    async fn list_event(
+        &self,
+        chat_id: i64,
+        event: &Event,
+        viewer_id: i64,
+        public: bool,
+    ) -> Result<(), BotError> {
         let params = SendMessageParams::builder()
             .chat_id(chat_id)
             .text(event.format_message())
             .parse_mode(ParseMode::MarkdownV2)
-            .reply_markup(ReplyMarkup::InlineKeyboardMarkup(event.create_keyboard()))
+            .reply_markup(ReplyMarkup::InlineKeyboardMarkup(
+                event.create_keyboard(viewer_id, public),
+            ))
             .build();
 
         self.api.send_message(&params)?;
@@ -441,7 +477,7 @@ impl Bot {
     }
 
     /// Lists all events in a chat
-    async fn list_events(&self, chat_id: i64) -> Result<(), BotError> {
+    async fn list_events(&self, chat_id: i64, viewer_id: i64) -> Result<(), BotError> {
         let events = self.fetch_events(chat_id).await?;
 
         if events.is_empty() {
@@ -450,7 +486,7 @@ impl Bot {
         }
 
         for event in events {
-            self.list_event(chat_id, &event).await?;
+            self.list_event(chat_id, &event, viewer_id, true).await?;
         }
 
         Ok(())
@@ -605,8 +641,12 @@ impl Bot {
 
             // Update just this event's message
             if let Some(message) = callback_query.message {
-                let (chat_id, message_id) = match message {
-                    MaybeInaccessibleMessage::Message(msg) => (msg.chat.id, msg.message_id),
+                let (chat_id, message_id, public) = match message {
+                    MaybeInaccessibleMessage::Message(msg) => (
+                        msg.chat.id,
+                        msg.message_id,
+                        msg.chat.type_field != frankenstein::ChatType::Private,
+                    ),
                     MaybeInaccessibleMessage::InaccessibleMessage(_) => {
                         return Ok(());
                     }
@@ -620,12 +660,12 @@ impl Bot {
                     .message_id(message_id)
                     .text(event.format_message())
                     .parse_mode(ParseMode::MarkdownV2)
-                    .reply_markup(event.create_keyboard())
+                    .reply_markup(event.create_keyboard(user_id, public))
                     .build();
 
                 return match self.api.edit_message_text(&edit_params) {
                     Ok(_) => Ok(()),
-                    Err(frankenstein::Error::Api(e))
+                    Err(frankenstein::Error::Api(ref e))
                         if e.error_code == 400
                             && e.description.contains("message is not modified") =>
                     {
@@ -633,6 +673,45 @@ impl Bot {
                     }
                     Err(e) => Err(BotError::Telegram(e)),
                 };
+            }
+        } else if data.starts_with("deleted_") {
+            let event_id: i64 = data
+                .split_once('_')
+                .ok_or(BotError::MissingDraft)?
+                .1
+                .parse()?;
+
+            let event = self.fetch_event(event_id).await?;
+            if event.creator != user_id {
+                return Ok(()); // Silently ignore if not event creator (others should not even see the Delete button)
+            }
+
+            if let Some(message) = callback_query.message {
+                let (chat_id, message_id) = match message {
+                    MaybeInaccessibleMessage::Message(msg) => (msg.chat.id, msg.message_id),
+                    MaybeInaccessibleMessage::InaccessibleMessage(_) => {
+                        return Ok(());
+                    }
+                };
+
+                // Delete the event from database
+                self.delete_event(event_id).await?;
+
+                // Delete the Telegram message
+                let delete_params = frankenstein::DeleteMessageParams::builder()
+                    .chat_id(chat_id)
+                    .message_id(message_id)
+                    .build();
+
+                if let Err(err) = self.api.delete_message(&delete_params) {
+                    match err {
+                        frankenstein::Error::Api(ref e) if e.error_code == 400 => { /* ignore */ }
+                        err => return Err(BotError::Telegram(err)),
+                    }
+                }
+
+                self.send_message(chat_id, "Event has been deleted.")
+                    .await?;
             }
         }
         Ok(())
