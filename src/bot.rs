@@ -1,5 +1,8 @@
 use crate::error::BotError;
-use crate::event::{Event, EventContext, EventCreationState, EventDraft};
+use crate::event::{
+    Event, EventContext, EventCreationState, EventDraft, DATETIME_FORMAT, DB_DATETIME_FORMAT,
+};
+use chrono::{NaiveDateTime, ParseError};
 use frankenstein::{
     AllowedUpdate, Api, CallbackQuery, ChatMember, EditMessageTextParams, GetUpdatesParams,
     MaybeInaccessibleMessage, Message, ParseMode, ReplyMarkup, SendMessageParams, TelegramApi,
@@ -271,31 +274,42 @@ impl Bot {
             EventCreationState::AwaitingLocation => {
                 context.draft.location = text.to_string();
                 context.state = EventCreationState::AwaitingTime;
-                self.send_message(
-                    chat_id,
-                    "Please enter the Date and Time the event takes place.",
-                )
-                .await?;
+
+                let prompt = format!(
+                    "Please enter the Date and Time of the event in the following format YYYY-MM-DD HH:MM (e.g., 2025-08-15 19:00)"
+                );
+                self.send_message(chat_id, &prompt).await?;
             }
             EventCreationState::AwaitingTime => {
-                context.draft.datetime = text.to_string();
+                match parse_datetime_string(text) {
+                    Ok(parsed_datetime) => {
+                        context.draft.datetime = text.to_string();
 
-                // Get the context before removing it
-                let EventContext {
-                    origin_chat_id,
-                    draft,
-                    ..
-                } = self
-                    .event_contexts
-                    .remove(&user_id)
-                    .ok_or(BotError::MissingDraft)?;
+                        // Get the context before removing it
+                        let EventContext {
+                            origin_chat_id,
+                            draft,
+                            ..
+                        } = self
+                            .event_contexts
+                            .remove(&user_id)
+                            .ok_or(BotError::MissingDraft)?;
 
-                self.create_event(user_id, origin_chat_id, &draft).await?;
-                self.send_message(
-                    chat_id,
-                    "The Event has been created and posted to the group!",
-                )
-                .await?;
+                        self.create_event(user_id, origin_chat_id, &draft, parsed_datetime)
+                            .await?;
+                        self.send_message(
+                            chat_id,
+                            "The Event has been created and posted to the group!",
+                        )
+                        .await?;
+                    }
+                    Err(_) => {
+                        let error_msg = format!(
+                            "Sorry, that doesn't look like a valid date/time. Please use the format YYYY-MM-DD HH:MM (e.g., 2025-08-15 19:00)."
+                        );
+                        self.send_message(chat_id, &error_msg).await?;
+                    }
+                }
             }
         }
 
@@ -396,7 +410,10 @@ To create an event:
         creator: i64,
         chat_id: i64,
         draft: &EventDraft,
+        datetime: NaiveDateTime,
     ) -> Result<(), BotError> {
+        let db_datetime_str = datetime.format(DB_DATETIME_FORMAT).to_string();
+
         let event_id = sqlx::query(
             r#"
             INSERT INTO events (creator, title, description, location, event_date, chat_id)
@@ -407,15 +424,15 @@ To create an event:
         .bind(&draft.title)
         .bind(&draft.description)
         .bind(&draft.location)
-        .bind(&draft.datetime)
+        .bind(&db_datetime_str)
         .bind(chat_id)
         .execute(&self.pool)
         .await?
         .last_insert_rowid();
 
         let event = self.fetch_event(event_id).await?;
-        self.list_event(chat_id, &event, creator, true).await?;
-        self.list_event(creator, &event, creator, false).await?;
+        self.list_event(chat_id, &event, creator, true).await?; // Post to group chat
+        self.list_event(creator, &event, creator, false).await?; // Post to creator's private chat
 
         Ok(())
     }
@@ -582,4 +599,9 @@ To create an event:
             user.first_name
         })
     }
+}
+
+/// Helper function to parse date string
+pub fn parse_datetime_string(datetime_str: &str) -> Result<NaiveDateTime, ParseError> {
+    NaiveDateTime::parse_from_str(datetime_str, DATETIME_FORMAT)
 }

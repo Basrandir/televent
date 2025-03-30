@@ -1,3 +1,4 @@
+use chrono::NaiveDateTime;
 use frankenstein::{InlineKeyboardButton, InlineKeyboardMarkup};
 use sqlx::Row;
 
@@ -34,20 +35,25 @@ pub struct Event {
     title: String,
     description: String,
     location: String,
-    event_date: String,
+    event_date: NaiveDateTime,
     pub creator: i64,
     pub accepted: Vec<(i64, String)>,
     pub declined: Vec<(i64, String)>,
 }
 
+pub const DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M";
+pub const DB_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
 impl Event {
     /// Creates a formatted message for Telegram display
     pub fn format_message(&self) -> String {
+        let formatted_datetime = self.event_date.format(DATETIME_FORMAT).to_string();
+
         let mut message = format!(
             "*__{}__*\n{}\n\n⏰ {}\n📍 {}\n",
             Self::escape_markdown(&self.title),
             Self::escape_markdown(&self.description),
-            Self::escape_markdown(&self.event_date),
+            Self::escape_markdown(&formatted_datetime),
             Self::escape_markdown(&self.location),
         );
 
@@ -98,12 +104,20 @@ impl Event {
 
     /// Creates an Event from a database row
     pub fn from_row(row: sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        let event_date_str: String = row.get("event_date");
+        let event_date = NaiveDateTime::parse_from_str(&event_date_str, DB_DATETIME_FORMAT)
+            .map_err(|e| {
+                eprintln!("Failed to parse date '{}' from DB: {}", event_date_str, e);
+
+                sqlx::Error::Decode(Box::new(e))
+            })?;
+
         Ok(Self {
             id: row.get("id"),
             title: row.get("title"),
             description: row.get("description"),
             location: row.get("location"),
-            event_date: row.get("event_date"),
+            event_date,
             creator: row.get("creator"),
             accepted: Vec::new(),
             declined: Vec::new(),
